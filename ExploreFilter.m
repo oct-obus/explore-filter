@@ -19,7 +19,14 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+// Compile with -DEF_LOGGING_ENABLED=1 for debug builds
+#ifndef EF_LOGGING_ENABLED
+#define EF_LOGGING_ENABLED 0
+#endif
+
 #pragma mark - Logging
+
+#if EF_LOGGING_ENABLED
 
 #define EF_LOG_PREFIX @"[ExploreFilter]"
 
@@ -62,6 +69,11 @@ static void EFLog(NSString *format, ...) {
     });
 }
 
+#else
+static void EFLogInit(void) {}
+static inline void EFLog(NSString *format, ...) {}
+#endif
+
 #pragma mark - Statistics
 
 static _Atomic NSUInteger sTotalItemsSeen = 0;
@@ -70,6 +82,33 @@ static _Atomic NSUInteger sFilteredImageOnly = 0;
 static _Atomic NSUInteger sFilteredVerticalReel = 0;
 static _Atomic NSUInteger sSkippedAds = 0;
 static _Atomic NSUInteger sSkippedNilLike = 0;
+
+#pragma mark - Deduplication
+
+static NSMutableSet *sSeenFilteredIDs = nil;
+static dispatch_queue_t sSeenQueue = nil;
+
+static void EFDedupeInit(void) {
+    sSeenFilteredIDs = [NSMutableSet setWithCapacity:256];
+    sSeenQueue = dispatch_queue_create("explore.filter.dedup", DISPATCH_QUEUE_SERIAL);
+}
+
+// Returns YES if this ID was already seen (duplicate). NO if first time.
+static BOOL EFMarkSeen(NSString *mediaID) {
+    if (!mediaID) return YES; // treat nil as duplicate (don't log)
+    __block BOOL wasSeen;
+    dispatch_sync(sSeenQueue, ^{
+        wasSeen = [sSeenFilteredIDs containsObject:mediaID];
+        if (!wasSeen) {
+            [sSeenFilteredIDs addObject:mediaID];
+            // Cap at 2000 to avoid unbounded growth
+            if (sSeenFilteredIDs.count > 2000) {
+                [sSeenFilteredIDs removeAllObjects];
+            }
+        }
+    });
+    return wasSeen;
+}
 
 #pragma mark - Cached Selectors
 
@@ -81,6 +120,7 @@ static SEL sSel_integerValue = NULL;
 static SEL sSel_mediaType = NULL;
 static SEL sSel_originalWidth = NULL;
 static SEL sSel_originalHeight = NULL;
+static SEL sSel_code = NULL;
 
 static void EFCacheSelectors(void) {
     static dispatch_once_t onceToken;
@@ -93,6 +133,7 @@ static void EFCacheSelectors(void) {
         sSel_mediaType = sel_registerName("mediaType");
         sSel_originalWidth = sel_registerName("originalWidth");
         sSel_originalHeight = sel_registerName("originalHeight");
+        sSel_code = sel_registerName("code");
     });
 }
 
@@ -105,22 +146,25 @@ typedef NS_ENUM(NSUInteger, EFFilterReason) {
     EFFilterReasonVerticalReel,
 };
 
+static NSString *EFReasonString(EFFilterReason reason) {
+    switch (reason) {
+        case EFFilterReasonLiked:       return @"liked";
+        case EFFilterReasonImageOnly:   return @"image";
+        case EFFilterReasonVerticalReel: return @"vreel";
+        default:                        return @"none";
+    }
+}
+
 #pragma mark - Safe Media Access
 
-// Returns the IGMedia object for a grid item, or nil if it's an ad/non-media item
 static id EFGetMediaForItem(id gridItem) {
     if (!gridItem) return nil;
-
     id model = ((id (*)(id, SEL))objc_msgSend)(gridItem, sSel_model);
     if (!model) return nil;
-
-    // Ad items have models that don't implement the media selector
     if (![model respondsToSelector:sSel_media]) return nil;
-
     return ((id (*)(id, SEL))objc_msgSend)(model, sSel_media);
 }
 
-// Returns the integer media type: 1=photo, 2=video, 8=carousel, 0=unknown
 static NSInteger EFGetMediaType(id media) {
     if (![media respondsToSelector:sSel_mediaType]) return 0;
     id boxed = ((id (*)(id, SEL))objc_msgSend)(media, sSel_mediaType);
@@ -128,13 +172,24 @@ static NSInteger EFGetMediaType(id media) {
     return ((NSInteger (*)(id, SEL))objc_msgSend)(boxed, sSel_integerValue);
 }
 
+// Returns shortcode (e.g. "DUEq5y6iDOx") or nil
+static NSString *EFGetShortcode(id media) {
+    if (![media respondsToSelector:sSel_code]) return nil;
+    id code = ((id (*)(id, SEL))objc_msgSend)(media, sSel_code);
+    if ([code isKindOfClass:[NSString class]] && [(NSString *)code length] > 0) {
+        return (NSString *)code;
+    }
+    return nil;
+}
+
 #pragma mark - Filter Checks
 
-static EFFilterReason EFCheckItem(id gridItem) {
+static EFFilterReason EFCheckItem(id gridItem, id *outMedia) {
     id media = EFGetMediaForItem(gridItem);
+    if (outMedia) *outMedia = media;
     if (!media) {
         sSkippedAds++;
-        return EFFilterReasonNone; // pass through ads and non-media items
+        return EFFilterReasonNone;
     }
 
     // Filter 1: Already-liked posts
@@ -151,7 +206,6 @@ static EFFilterReason EFCheckItem(id gridItem) {
     NSInteger mediaType = EFGetMediaType(media);
 
     // Filter 2: Image-only posts (mediaType 1 = photo)
-    // Carousels (type 8) are skipped — would need to iterate carouselMedia sub-items
     if (mediaType == 1) {
         return EFFilterReasonImageOnly;
     }
@@ -188,15 +242,39 @@ static NSArray *EFFilterGridItems(NSArray *items, NSString *source) {
     NSUInteger likedCount = 0, imageCount = 0, reelCount = 0;
 
     for (id item in items) {
-        EFFilterReason reason = EFCheckItem(item);
+        id media = nil;
+        EFFilterReason reason = EFCheckItem(item, &media);
         switch (reason) {
             case EFFilterReasonLiked:       likedCount++;  break;
             case EFFilterReasonImageOnly:   imageCount++;  break;
             case EFFilterReasonVerticalReel: reelCount++;  break;
             case EFFilterReasonNone:
                 [filtered addObject:item];
-                break;
+                continue; // skip logging for kept items
         }
+
+        // Log filtered item (deduplicated by shortcode)
+#if EF_LOGGING_ENABLED
+        if (media) {
+            NSString *shortcode = EFGetShortcode(media);
+            if (shortcode && !EFMarkSeen(shortcode)) {
+                if (reason == EFFilterReasonVerticalReel) {
+                    // Include aspect ratio for reels
+                    NSInteger w = 0, h = 0;
+                    id wBox = ((id (*)(id, SEL))objc_msgSend)(media, sSel_originalWidth);
+                    id hBox = ((id (*)(id, SEL))objc_msgSend)(media, sSel_originalHeight);
+                    if (wBox) w = ((NSInteger (*)(id, SEL))objc_msgSend)(wBox, sSel_integerValue);
+                    if (hBox) h = ((NSInteger (*)(id, SEL))objc_msgSend)(hBox, sSel_integerValue);
+                    EFLog(@"FILTERED [%@] https://www.instagram.com/p/%@/ (%ldx%ld = %.2f)",
+                          EFReasonString(reason), shortcode, (long)w, (long)h,
+                          h > 0 ? (double)w/(double)h : 0.0);
+                } else {
+                    EFLog(@"FILTERED [%@] https://www.instagram.com/p/%@/",
+                          EFReasonString(reason), shortcode);
+                }
+            }
+        }
+#endif
     }
 
     NSUInteger removedTotal = likedCount + imageCount + reelCount;
@@ -206,17 +284,18 @@ static NSArray *EFFilterGridItems(NSArray *items, NSString *source) {
     sFilteredVerticalReel += reelCount;
 
     if (removedTotal > 0) {
+#if EF_LOGGING_ENABLED
         NSUInteger lifetimeTotal = sFilteredLiked + sFilteredImageOnly + sFilteredVerticalReel;
         if ((lifetimeTotal & (lifetimeTotal - 1)) == 0 || lifetimeTotal <= 4) {
-            EFLog(@"%@: -%lu/%lu (liked=%lu img=%lu vreel=%lu) | life: seen=%lu L=%lu I=%lu V=%lu ads=%lu nil=%lu",
+            EFLog(@"%@: -%lu/%lu | life: seen=%lu L=%lu I=%lu V=%lu ads=%lu nil=%lu",
                   source,
                   (unsigned long)removedTotal, (unsigned long)originalCount,
-                  (unsigned long)likedCount, (unsigned long)imageCount, (unsigned long)reelCount,
                   (unsigned long)sTotalItemsSeen,
                   (unsigned long)sFilteredLiked, (unsigned long)sFilteredImageOnly,
                   (unsigned long)sFilteredVerticalReel,
                   (unsigned long)sSkippedAds, (unsigned long)sSkippedNilLike);
         }
+#endif
         return [filtered copy];
     }
 
@@ -240,7 +319,6 @@ static void EFSwizzleMethod(Class cls, SEL originalSel, IMP replacementImp, IMP 
     }
 
     const char *types = method_getTypeEncoding(method);
-    // Capture original IMP before class_addMethod to avoid TOCTOU with other tweaks
     IMP origImp = method_getImplementation(method);
     if (class_addMethod(cls, originalSel, replacementImp, types)) {
         *outOriginalImp = origImp;
@@ -274,7 +352,8 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
     EFLogInit();
-    EFLog(@"v6 loaded");
+    EFDedupeInit();
+    EFLog(@"v7 loaded");
 
     EFCacheSelectors();
 
@@ -295,8 +374,6 @@ static void ExploreFilterInit(void) {
             EFLog(@"WARNING: IGDiscoveryGridSection not found");
         }
 
-        // Defensive: add no-op showMultipleSelection to ad cell classes
-        // Prevents crash when grid layout calls selection on wrong cell type after filtering
         SEL showMultiSel = sel_registerName("showMultipleSelection");
         IMP noopIMP = imp_implementationWithBlock(^(id _self){});
         Class adClasses[] = {
