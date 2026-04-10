@@ -82,7 +82,6 @@ static SEL sSel_mediaType = NULL;
 static SEL sSel_video = NULL;
 static SEL sSel_originalWidth = NULL;
 static SEL sSel_originalHeight = NULL;
-static SEL sSel_isCarousel = NULL;
 
 static void EFCacheSelectors(void) {
     static dispatch_once_t onceToken;
@@ -96,7 +95,6 @@ static void EFCacheSelectors(void) {
         sSel_video = sel_registerName("video");
         sSel_originalWidth = sel_registerName("originalWidth");
         sSel_originalHeight = sel_registerName("originalHeight");
-        sSel_isCarousel = sel_registerName("isCarousel");
     });
 }
 
@@ -154,17 +152,10 @@ static EFFilterReason EFCheckItem(id gridItem) {
 
     NSInteger mediaType = EFGetMediaType(media);
 
-    // Filter 2: Image-only posts (mediaType 1 = photo, not carousel)
+    // Filter 2: Image-only posts (mediaType 1 = photo)
+    // Carousels (type 8) are skipped — would need to iterate carouselMedia sub-items
     if (mediaType == 1) {
         return EFFilterReasonImageOnly;
-    }
-
-    // Also filter carousels that contain no video (all images)
-    if (mediaType == 8 && [media respondsToSelector:sSel_video]) {
-        id videoObj = ((id (*)(id, SEL))objc_msgSend)(media, sSel_video);
-        if (!videoObj) {
-            return EFFilterReasonImageOnly;
-        }
     }
 
     // Filter 3: Vertical reels — single video with width/height < 0.6
