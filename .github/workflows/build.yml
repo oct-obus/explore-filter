@@ -29,7 +29,7 @@ jobs:
         run: |
           export THEOS=~/theos
           make clean
-          make EF_LOGGING=1
+          make FINALPACKAGE=1 EF_LOGGING=1
           cp .theos/obj/arm64/ExploreFilter.dylib ExploreFilter-debug.dylib
 
       - name: Build release (logging disabled)
