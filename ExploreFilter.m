@@ -79,7 +79,6 @@ static SEL sSel_hasLiked = NULL;
 static SEL sSel_boolValue = NULL;
 static SEL sSel_integerValue = NULL;
 static SEL sSel_mediaType = NULL;
-static SEL sSel_video = NULL;
 static SEL sSel_originalWidth = NULL;
 static SEL sSel_originalHeight = NULL;
 
@@ -92,7 +91,6 @@ static void EFCacheSelectors(void) {
         sSel_boolValue = sel_registerName("boolValue");
         sSel_integerValue = sel_registerName("integerValue");
         sSel_mediaType = sel_registerName("mediaType");
-        sSel_video = sel_registerName("video");
         sSel_originalWidth = sel_registerName("originalWidth");
         sSel_originalHeight = sel_registerName("originalHeight");
     });
@@ -276,7 +274,7 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
     EFLogInit();
-    EFLog(@"v5 loaded");
+    EFLog(@"v6 loaded");
 
     EFCacheSelectors();
 
