@@ -35,9 +35,26 @@ static void EFLog(NSString *format, ...) {
 
 #pragma mark - Statistics
 
-static NSUInteger sTotalItemsSeen = 0;
-static NSUInteger sTotalItemsFiltered = 0;
-static NSUInteger sTotalNilLikeStatus = 0;
+static _Atomic NSUInteger sTotalItemsSeen = 0;
+static _Atomic NSUInteger sTotalItemsFiltered = 0;
+static _Atomic NSUInteger sTotalNilLikeStatus = 0;
+
+#pragma mark - Cached Selectors
+
+static SEL sSel_model = NULL;
+static SEL sSel_media = NULL;
+static SEL sSel_hasLiked = NULL;
+static SEL sSel_boolValue = NULL;
+
+static void EFCacheSelectors(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sSel_model = sel_registerName("model");
+        sSel_media = sel_registerName("media");
+        sSel_hasLiked = sel_registerName("hasLiked");
+        sSel_boolValue = sel_registerName("boolValue");
+    });
+}
 
 #pragma mark - Filtering Logic
 
@@ -48,29 +65,19 @@ static NSUInteger sTotalNilLikeStatus = 0;
 static BOOL EFShouldFilterItem(id gridItem) {
     if (!gridItem) return NO;
 
-    // gridItem.model → id<IGDiscoveryGridItemType>
-    id model = ((id (*)(id, SEL))objc_msgSend)(gridItem, sel_registerName("model"));
+    id model = ((id (*)(id, SEL))objc_msgSend)(gridItem, sSel_model);
     if (!model) return NO;
 
-    // model.media → IGMedia
-    id media = ((id (*)(id, SEL))objc_msgSend)(model, sel_registerName("media"));
+    id media = ((id (*)(id, SEL))objc_msgSend)(model, sSel_media);
     if (!media) return NO;
 
-    // media.hasLiked → id<FBBoxedBoolean> (nullable)
-    id hasLiked = ((id (*)(id, SEL))objc_msgSend)(media, sel_registerName("hasLiked"));
-    if (!hasLiked) {
-        sTotalNilLikeStatus++;
-        return NO; // Like status unknown, keep the item
-    }
-
-    // Check if hasLiked is NSNull (defensive — API could return null)
-    if ([hasLiked isKindOfClass:[NSNull class]]) {
+    id hasLiked = ((id (*)(id, SEL))objc_msgSend)(media, sSel_hasLiked);
+    if (!hasLiked || [hasLiked isKindOfClass:[NSNull class]]) {
         sTotalNilLikeStatus++;
         return NO;
     }
 
-    // hasLiked.boolValue → BOOL
-    BOOL liked = ((BOOL (*)(id, SEL))objc_msgSend)(hasLiked, sel_registerName("boolValue"));
+    BOOL liked = ((BOOL (*)(id, SEL))objc_msgSend)(hasLiked, sSel_boolValue);
     return liked;
 }
 
@@ -97,17 +104,21 @@ static NSArray *EFFilterGridItems(NSArray *items, NSString *source) {
     sTotalItemsFiltered += removedCount;
 
     if (removedCount > 0) {
-        EFLog(@"%@: filtered %lu/%lu items (total: %lu seen, %lu filtered, %lu nil-like)",
-              source,
-              (unsigned long)removedCount,
-              (unsigned long)originalCount,
-              (unsigned long)sTotalItemsSeen,
-              (unsigned long)sTotalItemsFiltered,
-              (unsigned long)sTotalNilLikeStatus);
+        // Rate-limit logging: only log when lifetime filtered count crosses a power-of-2 boundary
+        NSUInteger totalFiltered = sTotalItemsFiltered;
+        if ((totalFiltered & (totalFiltered - 1)) == 0 || totalFiltered <= 4) {
+            EFLog(@"%@: filtered %lu/%lu items (lifetime: %lu seen, %lu filtered, %lu nil-like)",
+                  source,
+                  (unsigned long)removedCount,
+                  (unsigned long)originalCount,
+                  (unsigned long)sTotalItemsSeen,
+                  (unsigned long)totalFiltered,
+                  (unsigned long)sTotalNilLikeStatus);
+        }
         return [filtered copy];
     }
 
-    return items; // Return original if nothing filtered (avoid unnecessary copy)
+    return items;
 }
 
 #pragma mark - Method Swizzling Helpers
@@ -126,12 +137,24 @@ static void EFSwizzleMethod(Class cls, SEL originalSel, IMP replacementImp, IMP 
         return;
     }
 
-    *outOriginalImp = method_setImplementation(method, replacementImp);
-    EFLog(@"swizzled -%@ on %@ (orig IMP: %p → new IMP: %p)",
-          NSStringFromSelector(originalSel),
-          NSStringFromClass(cls),
-          *outOriginalImp,
-          replacementImp);
+    // Use class_addMethod to ensure we're adding directly to this class,
+    // not accidentally modifying a superclass method that was inherited
+    const char *types = method_getTypeEncoding(method);
+    if (class_addMethod(cls, originalSel, replacementImp, types)) {
+        // Method was inherited — class_addMethod installed our replacement directly on cls
+        *outOriginalImp = method_getImplementation(method);
+        EFLog(@"swizzled -%@ on %@ (was inherited, added directly; orig IMP: %p)",
+              NSStringFromSelector(originalSel),
+              NSStringFromClass(cls),
+              *outOriginalImp);
+    } else {
+        // Method exists directly on cls — safe to replace in place
+        *outOriginalImp = method_setImplementation(method, replacementImp);
+        EFLog(@"swizzled -%@ on %@ (direct replacement; orig IMP: %p)",
+              NSStringFromSelector(originalSel),
+              NSStringFromClass(cls),
+              *outOriginalImp);
+    }
 }
 
 #pragma mark - Hook: IGDiscoveryGridDataStore items
@@ -157,6 +180,7 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
     EFLog(@"initializing (v1.0)");
+    EFCacheSelectors();
 
     @try {
         // Hook 1: IGDiscoveryGridDataStore items
