@@ -25,78 +25,43 @@
 
 #define EF_LOG_PREFIX @"[ExploreFilter]"
 
-static NSString *sLogFilePath = nil;
-static NSString *sFallbackLogPath = @"/tmp/explore_filter.txt";
-static NSObject *sLogLock = nil;
+static NSString *sLogPath = nil;
+static dispatch_queue_t sLogQueue = nil;
 
-static NSString *EFLogFilePath(void) {
-    if (!sLogFilePath) {
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        if (paths.count > 0) {
-            sLogFilePath = [paths[0] stringByAppendingPathComponent:@"explore_filter.txt"];
-        }
-    }
-    return sLogFilePath;
-}
-
-static void EFWriteToFile(NSString *logPath, NSData *data) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:logPath]) {
-        [fm createFileAtPath:logPath contents:data attributes:nil];
-    } else {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
-        if ([attrs fileSize] > 512 * 1024) {
-            [data writeToFile:logPath atomically:YES];
-        } else {
-            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-            if (fh) {
-                [fh seekToEndOfFile];
-                [fh writeData:data];
-                [fh closeFile];
-            }
-        }
+static void EFLogInit(void) {
+    sLogQueue = dispatch_queue_create("explore.filter.log", DISPATCH_QUEUE_SERIAL);
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (paths.count > 0) {
+        sLogPath = [paths[0] stringByAppendingPathComponent:@"explore_filter.log"];
     }
 }
 
+static void EFLog(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
 static void EFLog(NSString *format, ...) {
+    if (!sLogPath) return;
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
     NSString *fullMsg = [NSString stringWithFormat:@"%@ %@", EF_LOG_PREFIX, msg];
-
-    // Console log
     NSLog(@"%@", fullMsg);
 
-    // File log
-    @try {
-        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    dispatch_async(sLogQueue, ^{
+        NSDateFormatter *df = [NSDateFormatter new];
         df.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
-        NSString *timestamp = [df stringFromDate:[NSDate date]];
-        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, fullMsg];
+        NSString *ts = [df stringFromDate:[NSDate date]];
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, fullMsg];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-
-        if (sLogLock) {
-            @synchronized(sLogLock) {
-                NSString *primary = EFLogFilePath();
-                if (primary) {
-                    EFWriteToFile(primary, data);
-                }
-                // Always write to fallback too for reliability
-                EFWriteToFile(sFallbackLogPath, data);
-            }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
         } else {
-            // sLogLock not yet initialized (very early in constructor)
-            NSString *primary = EFLogFilePath();
-            if (primary) {
-                EFWriteToFile(primary, data);
-            }
-            EFWriteToFile(sFallbackLogPath, data);
+            [data writeToFile:sLogPath atomically:YES];
         }
-    } @catch (NSException *e) {
-        NSLog(@"%@ FILE LOG ERROR: %@", EF_LOG_PREFIX, e.reason);
-    }
+    });
 }
 
 #pragma mark - Statistics
@@ -245,14 +210,8 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
-    sLogLock = [[NSObject alloc] init];
-
-    // First log line — before ANY other code — to confirm constructor ran
-    NSString *processName = [[NSProcessInfo processInfo] processName];
-    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"(nil)";
-    NSString *docsPath = EFLogFilePath() ?: @"(unavailable)";
-    EFLog(@"CONSTRUCTOR ENTRY — process: %@, bundle: %@, docs log: %@, fallback: %@",
-          processName, bundleId, docsPath, sFallbackLogPath);
+    EFLogInit();
+    EFLog(@"loaded — scanning for Explore classes...");
 
     EFCacheSelectors();
 
