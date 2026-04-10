@@ -246,10 +246,10 @@ static NSString *EFGetShortcode(id media) {
 static BOOL EFHasSquareCrop(id media) {
     if (![media respondsToSelector:sSel_mediaCroppingInfo]) return NO;
     id cropInfo = ((id (*)(id, SEL))objc_msgSend)(media, sSel_mediaCroppingInfo);
-    if (!cropInfo) return NO;
+    if (!cropInfo || [cropInfo isKindOfClass:[NSNull class]]) return NO;
     if (![cropInfo respondsToSelector:sSel_squareCrop]) return NO;
     id squareCrop = ((id (*)(id, SEL))objc_msgSend)(cropInfo, sSel_squareCrop);
-    return (squareCrop != nil);
+    return (squareCrop != nil && ![squareCrop isKindOfClass:[NSNull class]]);
 }
 
 #pragma mark - Filter Checks
