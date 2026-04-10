@@ -1,0 +1,28 @@
+name: Build ExploreFilter
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+
+      - name: Build
+        run: |
+          export THEOS=~/theos
+          make clean
+          make FINALPACKAGE=1
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExploreFilter-${{ github.sha }}
+          path: .theos/obj/arm64/ExploreFilter.dylib
