@@ -32,7 +32,7 @@ static void EFLogInit(void) {
     sLogQueue = dispatch_queue_create("explore.filter.log", DISPATCH_QUEUE_SERIAL);
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     if (paths.count > 0) {
-        sLogPath = [paths[0] stringByAppendingPathComponent:@"explore_filter.log"];
+        sLogPath = [paths[0] stringByAppendingPathComponent:@"explore_filter.txt"];
     }
 }
 
