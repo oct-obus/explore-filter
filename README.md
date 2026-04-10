@@ -26,6 +26,21 @@ make EF_LOGGING=1    # debug (logging enabled, default)
 make EF_LOGGING=0    # release (logging stripped at compile time)
 ```
 
+## Configuration
+
+On first launch, a config file is created at `Documents/explore_filter_config.json`:
+
+```json
+{
+  "filter_liked": true,
+  "filter_images": true,
+  "filter_vertical_reels": true,
+  "aspect_ratio_threshold": 0.6
+}
+```
+
+Edit this file on device to toggle filters or adjust the aspect ratio threshold. Changes take effect on next app launch.
+
 ## Target
 
 Instagram v415.0.0 (arm64), loaded via LiveContainer TweakLoader.

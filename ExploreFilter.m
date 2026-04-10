@@ -1,10 +1,10 @@
 /*
  * ExploreFilter — Filters Instagram Explore grid items
  *
- * Filters:
+ * Filters (all configurable via Documents/explore_filter_config.json):
  *   1. Already-liked posts (hasLiked == YES)
  *   2. Image-only posts (no video content)
- *   3. Vertical reels (single video with aspect ratio < 0.6)
+ *   3. Vertical reels (no square crop AND aspect ratio < threshold)
  *
  * Hook strategy:
  *   Swizzle -[IGDiscoveryGridDataStore items] and -[IGDiscoveryGridSection items]
@@ -121,6 +121,8 @@ static SEL sSel_mediaType = NULL;
 static SEL sSel_originalWidth = NULL;
 static SEL sSel_originalHeight = NULL;
 static SEL sSel_code = NULL;
+static SEL sSel_mediaCroppingInfo = NULL;
+static SEL sSel_squareCrop = NULL;
 
 static void EFCacheSelectors(void) {
     static dispatch_once_t onceToken;
@@ -134,7 +136,65 @@ static void EFCacheSelectors(void) {
         sSel_originalWidth = sel_registerName("originalWidth");
         sSel_originalHeight = sel_registerName("originalHeight");
         sSel_code = sel_registerName("code");
+        sSel_mediaCroppingInfo = sel_registerName("mediaCroppingInfo");
+        sSel_squareCrop = sel_registerName("squareCrop");
     });
+}
+
+#pragma mark - Configuration
+
+typedef struct {
+    BOOL filterLiked;
+    BOOL filterImages;
+    BOOL filterVerticalReels;
+    double aspectRatioThreshold;
+} EFConfig;
+
+static EFConfig sConfig = { .filterLiked = YES, .filterImages = YES,
+                             .filterVerticalReels = YES, .aspectRatioThreshold = 0.6 };
+
+static NSString *EFConfigPath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (paths.count == 0) return nil;
+    return [paths[0] stringByAppendingPathComponent:@"explore_filter_config.json"];
+}
+
+static void EFLoadConfig(void) {
+    NSString *path = EFConfigPath();
+    if (!path) return;
+
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) {
+        // Generate defaults
+        NSDictionary *defaults = @{
+            @"filter_liked": @YES,
+            @"filter_images": @YES,
+            @"filter_vertical_reels": @YES,
+            @"aspect_ratio_threshold": @0.6
+        };
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:defaults
+                                                           options:NSJSONWritingPrettyPrinted
+                                                             error:nil];
+        [jsonData writeToFile:path atomically:YES];
+        EFLog(@"config: created defaults at %@", path);
+        return;
+    }
+
+    NSError *err = nil;
+    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (!dict || err) {
+        EFLog(@"config: parse error — %@", err.localizedDescription);
+        return;
+    }
+
+    if (dict[@"filter_liked"])           sConfig.filterLiked = [dict[@"filter_liked"] boolValue];
+    if (dict[@"filter_images"])          sConfig.filterImages = [dict[@"filter_images"] boolValue];
+    if (dict[@"filter_vertical_reels"])  sConfig.filterVerticalReels = [dict[@"filter_vertical_reels"] boolValue];
+    if (dict[@"aspect_ratio_threshold"]) sConfig.aspectRatioThreshold = [dict[@"aspect_ratio_threshold"] doubleValue];
+
+    EFLog(@"config: liked=%d images=%d vreels=%d ratio=%.2f",
+          sConfig.filterLiked, sConfig.filterImages,
+          sConfig.filterVerticalReels, sConfig.aspectRatioThreshold);
 }
 
 #pragma mark - Filter Reason Enum
@@ -182,6 +242,16 @@ static NSString *EFGetShortcode(id media) {
     return nil;
 }
 
+// Returns YES if the media has a square crop applied (creator set 1:1 display)
+static BOOL EFHasSquareCrop(id media) {
+    if (![media respondsToSelector:sSel_mediaCroppingInfo]) return NO;
+    id cropInfo = ((id (*)(id, SEL))objc_msgSend)(media, sSel_mediaCroppingInfo);
+    if (!cropInfo) return NO;
+    if (![cropInfo respondsToSelector:sSel_squareCrop]) return NO;
+    id squareCrop = ((id (*)(id, SEL))objc_msgSend)(cropInfo, sSel_squareCrop);
+    return (squareCrop != nil);
+}
+
 #pragma mark - Filter Checks
 
 static EFFilterReason EFCheckItem(id gridItem, id *outMedia) {
@@ -193,7 +263,7 @@ static EFFilterReason EFCheckItem(id gridItem, id *outMedia) {
     }
 
     // Filter 1: Already-liked posts
-    if ([media respondsToSelector:sSel_hasLiked]) {
+    if (sConfig.filterLiked && [media respondsToSelector:sSel_hasLiked]) {
         id hasLiked = ((id (*)(id, SEL))objc_msgSend)(media, sSel_hasLiked);
         if (!hasLiked || [hasLiked isKindOfClass:[NSNull class]]) {
             sSkippedNilLike++;
@@ -206,13 +276,15 @@ static EFFilterReason EFCheckItem(id gridItem, id *outMedia) {
     NSInteger mediaType = EFGetMediaType(media);
 
     // Filter 2: Image-only posts (mediaType 1 = photo)
-    if (mediaType == 1) {
+    if (sConfig.filterImages && mediaType == 1) {
         return EFFilterReasonImageOnly;
     }
 
-    // Filter 3: Vertical reels — single video with width/height < 0.6
-    if (mediaType == 2 && [media respondsToSelector:sSel_originalWidth]
-                       && [media respondsToSelector:sSel_originalHeight]) {
+    // Filter 3: Vertical reels — single video with width/height < threshold, no square crop
+    if (sConfig.filterVerticalReels && mediaType == 2
+        && !EFHasSquareCrop(media)
+        && [media respondsToSelector:sSel_originalWidth]
+        && [media respondsToSelector:sSel_originalHeight]) {
         id wBox = ((id (*)(id, SEL))objc_msgSend)(media, sSel_originalWidth);
         id hBox = ((id (*)(id, SEL))objc_msgSend)(media, sSel_originalHeight);
         if (wBox && hBox
@@ -222,7 +294,7 @@ static EFFilterReason EFCheckItem(id gridItem, id *outMedia) {
             NSInteger h = ((NSInteger (*)(id, SEL))objc_msgSend)(hBox, sSel_integerValue);
             if (h > 0 && w > 0) {
                 double ratio = (double)w / (double)h;
-                if (ratio < 0.6) {
+                if (ratio < sConfig.aspectRatioThreshold) {
                     return EFFilterReasonVerticalReel;
                 }
             }
@@ -353,7 +425,8 @@ __attribute__((constructor))
 static void ExploreFilterInit(void) {
     EFLogInit();
     EFDedupeInit();
-    EFLog(@"v7 loaded");
+    EFLoadConfig();
+    EFLog(@"v8 loaded");
 
     EFCacheSelectors();
 
