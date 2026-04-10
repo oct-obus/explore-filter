@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "url": "https://raw.githubusercontent.com/oct-obus/explore-filter/master/ExploreFilter.dylib",
   "bundle_id": "com.burbn.instagram",
   "name": "ExploreFilter"
