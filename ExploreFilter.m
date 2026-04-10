@@ -26,16 +26,36 @@
 #define EF_LOG_PREFIX @"[ExploreFilter]"
 
 static NSString *sLogFilePath = nil;
+static NSString *sFallbackLogPath = @"/tmp/explore_filter.txt";
 static NSObject *sLogLock = nil;
 
 static NSString *EFLogFilePath(void) {
     if (!sLogFilePath) {
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         if (paths.count > 0) {
-            sLogFilePath = [paths[0] stringByAppendingPathComponent:@"explore_filter.log"];
+            sLogFilePath = [paths[0] stringByAppendingPathComponent:@"explore_filter.txt"];
         }
     }
     return sLogFilePath;
+}
+
+static void EFWriteToFile(NSString *logPath, NSData *data) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:logPath]) {
+        [fm createFileAtPath:logPath contents:data attributes:nil];
+    } else {
+        NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
+        if ([attrs fileSize] > 512 * 1024) {
+            [data writeToFile:logPath atomically:YES];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:data];
+                [fh closeFile];
+            }
+        }
+    }
 }
 
 static void EFLog(NSString *format, ...) {
@@ -50,31 +70,32 @@ static void EFLog(NSString *format, ...) {
     NSLog(@"%@", fullMsg);
 
     // File log
-    NSString *logPath = EFLogFilePath();
-    if (logPath) {
-        @synchronized(sLogLock) {
-            NSDateFormatter *df = [[NSDateFormatter alloc] init];
-            df.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
-            NSString *timestamp = [df stringFromDate:[NSDate date]];
-            NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, fullMsg];
-            NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    @try {
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+        NSString *timestamp = [df stringFromDate:[NSDate date]];
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, fullMsg];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
 
-            NSFileManager *fm = [NSFileManager defaultManager];
-            if (![fm fileExistsAtPath:logPath]) {
-                [fm createFileAtPath:logPath contents:data attributes:nil];
-            } else {
-                // Cap log file at 512KB — truncate if larger
-                NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
-                if ([attrs fileSize] > 512 * 1024) {
-                    [data writeToFile:logPath atomically:YES];
-                } else {
-                    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-                    [fh seekToEndOfFile];
-                    [fh writeData:data];
-                    [fh closeFile];
+        if (sLogLock) {
+            @synchronized(sLogLock) {
+                NSString *primary = EFLogFilePath();
+                if (primary) {
+                    EFWriteToFile(primary, data);
                 }
+                // Always write to fallback too for reliability
+                EFWriteToFile(sFallbackLogPath, data);
             }
+        } else {
+            // sLogLock not yet initialized (very early in constructor)
+            NSString *primary = EFLogFilePath();
+            if (primary) {
+                EFWriteToFile(primary, data);
+            }
+            EFWriteToFile(sFallbackLogPath, data);
         }
+    } @catch (NSException *e) {
+        NSLog(@"%@ FILE LOG ERROR: %@", EF_LOG_PREFIX, e.reason);
     }
 }
 
@@ -225,8 +246,14 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
     sLogLock = [[NSObject alloc] init];
-    EFLog(@"initializing (v1.0)");
-    EFLog(@"log file: %@", EFLogFilePath() ?: @"(unavailable)");
+
+    // First log line — before ANY other code — to confirm constructor ran
+    NSString *processName = [[NSProcessInfo processInfo] processName];
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"(nil)";
+    NSString *docsPath = EFLogFilePath() ?: @"(unavailable)";
+    EFLog(@"CONSTRUCTOR ENTRY — process: %@, bundle: %@, docs log: %@, fallback: %@",
+          processName, bundleId, docsPath, sFallbackLogPath);
+
     EFCacheSelectors();
 
     @try {
