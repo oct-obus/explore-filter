@@ -11,7 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-v2
+
       - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
