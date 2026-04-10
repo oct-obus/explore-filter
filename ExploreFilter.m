@@ -251,8 +251,10 @@ static void EFSwizzleMethod(Class cls, SEL originalSel, IMP replacementImp, IMP 
     }
 
     const char *types = method_getTypeEncoding(method);
+    // Capture original IMP before class_addMethod to avoid TOCTOU with other tweaks
+    IMP origImp = method_getImplementation(method);
     if (class_addMethod(cls, originalSel, replacementImp, types)) {
-        *outOriginalImp = method_getImplementation(method);
+        *outOriginalImp = origImp;
         EFLog(@"swizzled -%@ on %@ (inherited; orig: %p)",
               NSStringFromSelector(originalSel), NSStringFromClass(cls), *outOriginalImp);
     } else {
