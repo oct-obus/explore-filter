@@ -25,12 +25,57 @@
 
 #define EF_LOG_PREFIX @"[ExploreFilter]"
 
+static NSString *sLogFilePath = nil;
+static NSObject *sLogLock = nil;
+
+static NSString *EFLogFilePath(void) {
+    if (!sLogFilePath) {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (paths.count > 0) {
+            sLogFilePath = [paths[0] stringByAppendingPathComponent:@"explore_filter.log"];
+        }
+    }
+    return sLogFilePath;
+}
+
 static void EFLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSLog(@"%@ %@", EF_LOG_PREFIX, msg);
+
+    NSString *fullMsg = [NSString stringWithFormat:@"%@ %@", EF_LOG_PREFIX, msg];
+
+    // Console log
+    NSLog(@"%@", fullMsg);
+
+    // File log
+    NSString *logPath = EFLogFilePath();
+    if (logPath) {
+        @synchronized(sLogLock) {
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+            NSString *timestamp = [df stringFromDate:[NSDate date]];
+            NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, fullMsg];
+            NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if (![fm fileExistsAtPath:logPath]) {
+                [fm createFileAtPath:logPath contents:data attributes:nil];
+            } else {
+                // Cap log file at 512KB — truncate if larger
+                NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
+                if ([attrs fileSize] > 512 * 1024) {
+                    [data writeToFile:logPath atomically:YES];
+                } else {
+                    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+                    [fh seekToEndOfFile];
+                    [fh writeData:data];
+                    [fh closeFile];
+                }
+            }
+        }
+    }
 }
 
 #pragma mark - Statistics
@@ -179,7 +224,9 @@ static NSArray *EFHook_Section_items(id self, SEL _cmd) {
 
 __attribute__((constructor))
 static void ExploreFilterInit(void) {
+    sLogLock = [[NSObject alloc] init];
     EFLog(@"initializing (v1.0)");
+    EFLog(@"log file: %@", EFLogFilePath() ?: @"(unavailable)");
     EFCacheSelectors();
 
     @try {
