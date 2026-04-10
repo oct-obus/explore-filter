@@ -1,0 +1,190 @@
+/*
+ * ExploreFilter — Hides already-liked posts from Instagram Explore grid
+ *
+ * Hook strategy:
+ *   1. Swizzle -[IGDiscoveryGridDataStore items] to filter out liked items
+ *   2. Swizzle -[IGDiscoveryGridSection items] as secondary filter (same logic)
+ *   3. Comprehensive logging for on-device debugging
+ *
+ * Data flow:
+ *   IGExploreListKitDataSource.dataStore (IGDiscoveryGridDataStore)
+ *     → items: [IGDiscoveryGridItem]
+ *       → model: id<IGDiscoveryGridItemType>
+ *         → media: IGMedia (inherits IGBaseMedia)
+ *           → hasLiked: id<FBBoxedBoolean> → boolValue
+ *
+ * hasLiked is nullable (id<FBBoxedBoolean>). When nil, the item passes through.
+ * After hydration, hasLiked gets populated and the grid refreshes automatically.
+ */
+
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+
+#pragma mark - Logging
+
+#define EF_LOG_PREFIX @"[ExploreFilter]"
+
+static void EFLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"%@ %@", EF_LOG_PREFIX, msg);
+}
+
+#pragma mark - Statistics
+
+static NSUInteger sTotalItemsSeen = 0;
+static NSUInteger sTotalItemsFiltered = 0;
+static NSUInteger sTotalNilLikeStatus = 0;
+
+#pragma mark - Filtering Logic
+
+/*
+ * Given an IGDiscoveryGridItem, returns YES if it should be REMOVED (is liked).
+ * Returns NO if it should be kept (not liked, or like status unknown).
+ */
+static BOOL EFShouldFilterItem(id gridItem) {
+    if (!gridItem) return NO;
+
+    // gridItem.model → id<IGDiscoveryGridItemType>
+    id model = ((id (*)(id, SEL))objc_msgSend)(gridItem, sel_registerName("model"));
+    if (!model) return NO;
+
+    // model.media → IGMedia
+    id media = ((id (*)(id, SEL))objc_msgSend)(model, sel_registerName("media"));
+    if (!media) return NO;
+
+    // media.hasLiked → id<FBBoxedBoolean> (nullable)
+    id hasLiked = ((id (*)(id, SEL))objc_msgSend)(media, sel_registerName("hasLiked"));
+    if (!hasLiked) {
+        sTotalNilLikeStatus++;
+        return NO; // Like status unknown, keep the item
+    }
+
+    // Check if hasLiked is NSNull (defensive — API could return null)
+    if ([hasLiked isKindOfClass:[NSNull class]]) {
+        sTotalNilLikeStatus++;
+        return NO;
+    }
+
+    // hasLiked.boolValue → BOOL
+    BOOL liked = ((BOOL (*)(id, SEL))objc_msgSend)(hasLiked, sel_registerName("boolValue"));
+    return liked;
+}
+
+/*
+ * Filters an array of IGDiscoveryGridItem, removing liked items.
+ * Returns the filtered array (may be same array if nothing filtered).
+ */
+static NSArray *EFFilterGridItems(NSArray *items, NSString *source) {
+    if (!items || items.count == 0) return items;
+
+    NSUInteger originalCount = items.count;
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:originalCount];
+    NSUInteger removedCount = 0;
+
+    for (id item in items) {
+        if (EFShouldFilterItem(item)) {
+            removedCount++;
+        } else {
+            [filtered addObject:item];
+        }
+    }
+
+    sTotalItemsSeen += originalCount;
+    sTotalItemsFiltered += removedCount;
+
+    if (removedCount > 0) {
+        EFLog(@"%@: filtered %lu/%lu items (total: %lu seen, %lu filtered, %lu nil-like)",
+              source,
+              (unsigned long)removedCount,
+              (unsigned long)originalCount,
+              (unsigned long)sTotalItemsSeen,
+              (unsigned long)sTotalItemsFiltered,
+              (unsigned long)sTotalNilLikeStatus);
+        return [filtered copy];
+    }
+
+    return items; // Return original if nothing filtered (avoid unnecessary copy)
+}
+
+#pragma mark - Method Swizzling Helpers
+
+static void EFSwizzleMethod(Class cls, SEL originalSel, IMP replacementImp, IMP *outOriginalImp) {
+    if (!cls) {
+        EFLog(@"swizzle FAILED: class is nil for -%@", NSStringFromSelector(originalSel));
+        return;
+    }
+
+    Method method = class_getInstanceMethod(cls, originalSel);
+    if (!method) {
+        EFLog(@"swizzle FAILED: method -%@ not found on %@",
+              NSStringFromSelector(originalSel),
+              NSStringFromClass(cls));
+        return;
+    }
+
+    *outOriginalImp = method_setImplementation(method, replacementImp);
+    EFLog(@"swizzled -%@ on %@ (orig IMP: %p → new IMP: %p)",
+          NSStringFromSelector(originalSel),
+          NSStringFromClass(cls),
+          *outOriginalImp,
+          replacementImp);
+}
+
+#pragma mark - Hook: IGDiscoveryGridDataStore items
+
+static IMP sOrigDataStoreItems = NULL;
+
+static NSArray *EFHook_DataStore_items(id self, SEL _cmd) {
+    NSArray *original = ((NSArray *(*)(id, SEL))sOrigDataStoreItems)(self, _cmd);
+    return EFFilterGridItems(original, @"DataStore.items");
+}
+
+#pragma mark - Hook: IGDiscoveryGridSection items
+
+static IMP sOrigSectionItems = NULL;
+
+static NSArray *EFHook_Section_items(id self, SEL _cmd) {
+    NSArray *original = ((NSArray *(*)(id, SEL))sOrigSectionItems)(self, _cmd);
+    return EFFilterGridItems(original, @"Section.items");
+}
+
+#pragma mark - Constructor
+
+__attribute__((constructor))
+static void ExploreFilterInit(void) {
+    EFLog(@"initializing (v1.0)");
+
+    @try {
+        // Hook 1: IGDiscoveryGridDataStore items
+        Class dataStoreClass = objc_getClass("IGDiscoveryGridDataStore");
+        if (dataStoreClass) {
+            EFSwizzleMethod(dataStoreClass,
+                            sel_registerName("items"),
+                            (IMP)EFHook_DataStore_items,
+                            &sOrigDataStoreItems);
+        } else {
+            EFLog(@"WARNING: IGDiscoveryGridDataStore class not found");
+        }
+
+        // Hook 2: IGDiscoveryGridSection items
+        Class sectionClass = objc_getClass("IGDiscoveryGridSection");
+        if (sectionClass) {
+            EFSwizzleMethod(sectionClass,
+                            sel_registerName("items"),
+                            (IMP)EFHook_Section_items,
+                            &sOrigSectionItems);
+        } else {
+            EFLog(@"WARNING: IGDiscoveryGridSection class not found");
+        }
+
+        EFLog(@"initialization complete — %d hooks installed",
+              (sOrigDataStoreItems ? 1 : 0) + (sOrigSectionItems ? 1 : 0));
+
+    } @catch (NSException *e) {
+        EFLog(@"FATAL: initialization failed: %@ — %@", e.name, e.reason);
+    }
+}
