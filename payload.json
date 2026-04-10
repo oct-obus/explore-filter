@@ -1,6 +1,6 @@
 {
-    "version": 4,
-    "url": "https://raw.githubusercontent.com/oct-obus/explore-filter/master/ExploreFilter.dylib",
-    "bundle_id": "com.burbn.instagram",
-    "name": "ExploreFilter"
+  "version": 5,
+  "url": "https://raw.githubusercontent.com/oct-obus/explore-filter/master/ExploreFilter.dylib",
+  "bundle_id": "com.burbn.instagram",
+  "name": "ExploreFilter"
 }
