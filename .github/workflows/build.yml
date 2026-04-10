@@ -25,14 +25,30 @@ jobs:
         run: |
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
-      - name: Build
+      - name: Build debug (logging enabled)
         run: |
           export THEOS=~/theos
           make clean
-          make FINALPACKAGE=1
+          make EF_LOGGING=1
+          cp .theos/obj/arm64/ExploreFilter.dylib ExploreFilter-debug.dylib
 
-      - name: Upload dylib
+      - name: Build release (logging disabled)
+        run: |
+          export THEOS=~/theos
+          make clean
+          make FINALPACKAGE=1 EF_LOGGING=0
+          cp .theos/obj/arm64/ExploreFilter.dylib ExploreFilter-release.dylib
+
+      - name: Upload debug dylib
         uses: actions/upload-artifact@v4
         with:
-          name: ExploreFilter-${{ github.sha }}
-          path: .theos/obj/arm64/ExploreFilter.dylib
+          name: ExploreFilter-debug
+          path: ExploreFilter-debug.dylib
+          compression-level: 0
+
+      - name: Upload release dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExploreFilter-release
+          path: ExploreFilter-release.dylib
+          compression-level: 0
