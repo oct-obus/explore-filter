@@ -41,6 +41,22 @@ On first launch, a config file is created at `Documents/explore_filter_config.js
 
 Edit this file on device to toggle filters or adjust the aspect ratio threshold. Changes take effect on next app launch.
 
+## Status
+
+**Done:**
+- [x] Filter already-liked posts
+- [x] Filter image-only posts
+- [x] Filter vertical reels (configurable aspect ratio threshold)
+- [x] Square crop false-positive fix (portrait videos with 1:1 crop applied are preserved)
+- [x] NSNull guard for squareCrop metadata edge case
+- [x] Ad cell passthrough (ads not filtered)
+- [x] Atomic stats counters + deduplication logging
+- [x] Compile-time debug log toggle
+
+**Planned:**
+- [ ] Carousel filtering (mediaType 8) — needs per-item sub-iteration to check if all items are images
+- [ ] Crash debugging with Theta.dylib (CrashCatcher built, untested)
+
 ## Target
 
 Instagram v415.0.0 (arm64), loaded via LiveContainer TweakLoader.
