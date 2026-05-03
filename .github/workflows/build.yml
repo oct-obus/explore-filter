@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -55,3 +57,15 @@ jobs:
           name: ExploreFilter-release
           path: ExploreFilter-release.dylib
           compression-level: 0
+
+      - name: Update latest release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          git tag -f latest
+          git push origin latest --force
+          gh release create latest ExploreFilter-debug.dylib ExploreFilter-release.dylib \
+            --title "Latest Build" \
+            --notes "Auto-updated on every push to master." \
+            --prerelease

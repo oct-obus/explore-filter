@@ -75,6 +75,13 @@ make EF_LOGGING=0 # release build (no logging)
 
 GitHub Actions builds both debug and release dylibs on every push to `master`. Download artifacts from the [Actions tab](../../actions).
 
+## Download
+
+Latest build (auto-updated on every push to `master`):
+
+- **Debug** (logging enabled): [ExploreFilter-debug.dylib](https://github.com/oct-obus/explore-filter/releases/download/latest/ExploreFilter-debug.dylib)
+- **Release** (logging stripped): [ExploreFilter-release.dylib](https://github.com/oct-obus/explore-filter/releases/download/latest/ExploreFilter-release.dylib)
+
 ## Installation
 
 1. Place `ExploreFilter.dylib` in `Tweaks/` inside the app bundle
